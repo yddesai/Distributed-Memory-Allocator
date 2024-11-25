@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"regexp"
 
 	"github.com/schollz/progressbar/v3"
 )
@@ -306,7 +305,6 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 
 	// Clean and preprocess JSON data
 	cleanData := string(data)
-	cleanData = preprocessJSON(cleanData) // Use preprocessing function as explained earlier
 
 	// Validate JSON format
 	if !json.Valid([]byte(cleanData)) {
@@ -407,6 +405,7 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 
 	return nil
 }
+
 
 
 
