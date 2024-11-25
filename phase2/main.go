@@ -297,7 +297,7 @@ func distributeFiles() error {
 
 func processJSONFile(fileName string, activeNodes []types.Node) error {
 	filePath := fmt.Sprintf("%s/%s", backupFolder, fileName)
-	
+
 	// Read file content
 	data, err := ioutil.ReadFile(filePath)
 	if err != nil {
@@ -306,28 +306,40 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 
 	// Clean and fix JSON data
 	cleanData := string(data)
-	
+
 	// Remove any non-printable characters
 	re := regexp.MustCompile(`[\x00-\x1F\x7F]`)
 	cleanData = re.ReplaceAllString(cleanData, "")
-	
+
 	// Fix common JSON issues
-	cleanData = strings.ReplaceAll(cleanData, "-", "") // Remove hyphens from phone numbers
-	cleanData = strings.ReplaceAll(cleanData, "e+", "e") // Fix scientific notation
-	cleanData = strings.ReplaceAll(cleanData, "e-", "e") // Fix scientific notation
-	cleanData = strings.ReplaceAll(cleanData, "NaN", "0") // Replace NaN with 0
+	cleanData = strings.ReplaceAll(cleanData, "-", "")      // Remove hyphens from phone numbers
+	cleanData = strings.ReplaceAll(cleanData, "e+", "e")    // Fix scientific notation
+	cleanData = strings.ReplaceAll(cleanData, "e-", "e")    // Fix scientific notation
+	cleanData = strings.ReplaceAll(cleanData, "NaN", "0")   // Replace NaN with 0
 	cleanData = strings.ReplaceAll(cleanData, "Infinity", "0") // Replace Infinity with 0
-	
-	var records []map[string]interface{}
-	err = json.Unmarshal([]byte(cleanData), &records)
+
+	// Parse JSON using `json.Number` to handle potential type mismatches
+	var rawData interface{}
+	decoder := json.NewDecoder(strings.NewReader(cleanData))
+	decoder.UseNumber() // Ensure numbers are decoded as `json.Number`
+	err = decoder.Decode(&rawData)
 	if err != nil {
-		// Try to parse with more lenient decoder if standard unmarshal fails
-		d := json.NewDecoder(strings.NewReader(cleanData))
-		d.UseNumber()
-		err = d.Decode(&records)
-		if err != nil {
-			return fmt.Errorf("failed to parse JSON: %v", err)
+		return fmt.Errorf("failed to parse JSON: %v", err)
+	}
+
+	// Convert to desired structure
+	var records []map[string]interface{}
+	switch v := rawData.(type) {
+	case []interface{}:
+		for _, item := range v {
+			if record, ok := item.(map[string]interface{}); ok {
+				records = append(records, record)
+			} else {
+				return fmt.Errorf("unexpected JSON format: item is not an object")
+			}
 		}
+	default:
+		return fmt.Errorf("unexpected JSON format: root element is not an array")
 	}
 
 	totalRecords := len(records)
@@ -343,16 +355,16 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 	for i, chunk := range chunks {
 		nodeIndex := i % len(activeNodes)
 		node := activeNodes[nodeIndex]
-		
+
 		chunkFileName := fmt.Sprintf("%s_chunk_%d.json", strings.TrimSuffix(fileName, ".json"), i)
 		chunkPath := fmt.Sprintf("%s/%s", backupFolder, chunkFileName)
-		
+
 		// Save chunk to file
 		chunkData, err := json.MarshalIndent(chunk.Records, "", "  ") // Use MarshalIndent for better formatting
 		if err != nil {
 			return fmt.Errorf("failed to marshal chunk: %v", err)
 		}
-		
+
 		err = ioutil.WriteFile(chunkPath, chunkData, 0644)
 		if err != nil {
 			return fmt.Errorf("failed to write chunk file: %v", err)
@@ -369,7 +381,7 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 			SourcePath: chunkPath,
 			FileName:   chunkFileName,
 		}
-		
+
 		masterIndex.Chunks = append(masterIndex.Chunks, chunkInfo)
 
 		// Transfer chunk to node
@@ -397,6 +409,7 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 
 	return nil
 }
+
 
 type Chunk struct {
 	StartID  int
