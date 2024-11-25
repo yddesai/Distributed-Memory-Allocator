@@ -1,48 +1,47 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"os"
-	"phase2/config" // Changed from "./config"
-	"phase2/types"  // Changed from "./types"
-	"sync"
+	"phase2/config"
+	"phase2/types"
+	"strings"
 	"time"
-	// Changed from "./utils"
 )
 
 var (
 	localFolder = config.LOCAL_FOLDER
 	awsURL      = config.DefaultConfig.AWSURL
 	node        types.Node
-	localTable  types.LocalTable
-	tableLock   sync.RWMutex
 )
 
 func main() {
-	// Take capacity as command line argument or use default
-	capacity := 500 // Default 500MB
-	if len(os.Args) > 1 {
-		fmt.Sscanf(os.Args[1], "%d", &capacity)
+	os.MkdirAll(localFolder, 0755)
+
+	// Initialize node with port selection
+	if !initializeNode() {
+		fmt.Println("[ERROR] No available ports found. Exiting...")
+		return
 	}
 
-	os.MkdirAll(localFolder, 0755)
-	initializeNode(capacity)
+	// Register with AWS
+	registerNode()
 
-	// Start background processes
+	// Start heartbeat
 	go sendHeartbeats()
-	go monitorLocalStorage()
-	go syncLocalTable()
 
-	// Setup HTTP handlers
+	// Setup HTTP server for receiving files
 	http.HandleFunc("/receive", receiveFiles)
-	http.HandleFunc("/query", handleQuery)
 	http.HandleFunc("/status", handleStatus)
+	http.HandleFunc("/query", handleQuery)
 
-	// Start command interface in a goroutine
+	// Start command interface
 	go commandInterface()
 
 	fmt.Printf("[INFO] Laptop node %s started. Listening on port %d...\n", node.ID, node.Port)
@@ -53,12 +52,9 @@ func main() {
 	}
 }
 
-func initializeNode(capacity int) bool {
-	// Generate unique ID
+func initializeNode() bool {
 	nodeID := fmt.Sprintf("laptop-%d", time.Now().Unix()%1000)
 	ip := getPublicIP()
-
-	// Check for existing nodes with same IP
 	existingNode := checkExistingNodesWithSameIP(ip)
 	port := findAvailablePort(existingNode)
 
@@ -68,84 +64,117 @@ func initializeNode(capacity int) bool {
 
 	node = types.Node{
 		ID:       nodeID,
-		Capacity: capacity,
+		Capacity: 500, // Default capacity in MB
 		MacID:    getMacAddress(),
 		IP:       ip,
 		Port:     port,
 		Status:   "active",
 	}
 
-	// Initialize local table
-	localTable = types.LocalTable{
-		NodeID:   nodeID,
-		Chunks:   make(map[string]types.ChunkInfo),
-		Capacity: capacity,
-		Used:     0,
-		LastSync: time.Now(),
-	}
-
-	fmt.Printf("[INFO] Initialized node: %s (MAC: %s, IP: %s, Port: %d, Capacity: %dMB)\n",
-		node.ID, node.MacID, node.IP, node.Port, capacity)
+	fmt.Printf("[INFO] Initialized node: %s (MAC: %s, IP: %s, Port: %d)\n",
+		node.ID, node.MacID, node.IP, node.Port)
 	return true
 }
 
-func monitorLocalStorage() {
-	ticker := time.NewTicker(30 * time.Second)
-	for range ticker.C {
-		updateLocalStorage()
+func getMacAddress() string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return fmt.Sprintf("unknown-%d", time.Now().Unix())
 	}
+
+	for _, i := range interfaces {
+		if i.Flags&net.FlagUp != 0 && !strings.HasPrefix(i.Name, "lo") {
+			return i.HardwareAddr.String()
+		}
+	}
+
+	return fmt.Sprintf("unknown-%d", time.Now().Unix())
 }
 
-func updateLocalStorage() {
-	files, err := ioutil.ReadDir(localFolder)
+func getPublicIP() string {
+	resp, err := http.Get("https://api.ipify.org?format=text")
 	if err != nil {
-		fmt.Printf("[ERROR] Failed to read local folder: %s\n", err)
-		return
+		fmt.Println("[ERROR] Unable to fetch public IP:", err)
+		return "localhost"
 	}
+	defer resp.Body.Close()
 
-	tableLock.Lock()
-	defer tableLock.Unlock()
-
-	var totalSize int64
-	for _, file := range files {
-		totalSize += file.Size()
+	ip, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "localhost"
 	}
-
-	localTable.Used = int(totalSize / 1024 / 1024) // Convert to MB
-	localTable.LastSync = time.Now()
-
-	// Print storage metrics
-	fmt.Printf("\n=== Storage Status ===\n")
-	fmt.Printf("Capacity: %d MB\n", localTable.Capacity)
-	fmt.Printf("Used: %d MB\n", localTable.Used)
-	fmt.Printf("Available: %d MB\n", localTable.Capacity-localTable.Used)
-	fmt.Printf("Chunks: %d\n", len(localTable.Chunks))
+	return string(ip)
 }
 
-func syncLocalTable() {
-	ticker := time.NewTicker(1 * time.Minute)
-	for range ticker.C {
-		sendLocalTableToAWS()
+func checkExistingNodesWithSameIP(ip string) bool {
+	resp, err := http.Get(fmt.Sprintf("%s/nodes", awsURL))
+	if err != nil {
+		fmt.Printf("[WARNING] Could not check existing nodes: %v\n", err)
+		return false
 	}
+	defer resp.Body.Close()
+
+	var existingNodes map[string]types.Node
+	if err := json.NewDecoder(resp.Body).Decode(&existingNodes); err != nil {
+		fmt.Printf("[WARNING] Could not decode existing nodes: %v\n", err)
+		return false
+	}
+
+	for _, n := range existingNodes {
+		if n.IP == ip && n.Status == "active" {
+			return true
+		}
+	}
+	return false
 }
 
-func sendLocalTableToAWS() {
-	tableLock.RLock()
-	data, err := json.Marshal(localTable)
-	tableLock.RUnlock()
-
-	if err != nil {
-		fmt.Printf("[ERROR] Failed to marshal local table: %s\n", err)
-		return
+func findAvailablePort(existingPort bool) int {
+	if !existingPort {
+		listener, err := net.Listen("tcp", ":8081")
+		if err == nil {
+			listener.Close()
+			return 8081
+		}
 	}
 
-	resp, err := http.Post(fmt.Sprintf("%s/localtable", awsURL),
-		"application/json", bytes.NewBuffer(data))
+	for port := 5000; port < 5010; port++ {
+		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			listener.Close()
+			return port
+		}
+	}
+	return -1
+}
+
+func registerNode() {
+	data, _ := json.Marshal(node)
+	resp, err := http.Post(awsURL+"/register", "application/json", bytes.NewBuffer(data))
 	if err != nil {
-		fmt.Printf("[ERROR] Failed to sync local table: %s\n", err)
+		fmt.Println("[ERROR] Failed to register with AWS:", err)
 		return
 	}
 	defer resp.Body.Close()
+}
+
+func sendHeartbeats() {
+	for {
+		data, _ := json.Marshal(node)
+		_, err := http.Post(awsURL+"/heartbeat", "application/json", bytes.NewBuffer(data))
+		if err != nil {
+			fmt.Println("[ERROR] Failed to send heartbeat:", err)
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func handleStatus(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":       node.ID,
+		"status":   "active",
+		"capacity": node.Capacity,
+		"port":     node.Port,
+	})
 }
 
 func handleQuery(w http.ResponseWriter, r *http.Request) {
@@ -161,45 +190,7 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Process query
-	result, err := processQuery(query)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	json.NewEncoder(w).Encode(result)
-}
-
-func processQuery(query types.Query) (interface{}, error) {
-	tableLock.RLock()
-	defer tableLock.RUnlock()
-
-	// Find the chunk containing the requested ID
-	for _, chunk := range localTable.Chunks {
-		if query.ID >= chunk.StartID && query.ID <= chunk.EndID {
-			// Read and parse the chunk file
-			data, err := ioutil.ReadFile(fmt.Sprintf("%s/%s", localFolder, chunk.ChunkID))
-			if err != nil {
-				return nil, err
-			}
-
-			// Parse JSON and find specific record
-			var records []map[string]interface{}
-			err = json.Unmarshal(data, &records)
-			if err != nil {
-				return nil, err
-			}
-
-			// Find the specific record
-			for _, record := range records {
-				if int(record["id"].(float64)) == query.ID {
-					return record, nil
-				}
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("record not found")
+	// Implementation needed based on your requirements
 }
 
 func receiveFiles(w http.ResponseWriter, r *http.Request) {
@@ -220,16 +211,6 @@ func receiveFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check capacity
-	tableLock.RLock()
-	if localTable.Used+len(body)/(1024*1024) > localTable.Capacity {
-		tableLock.RUnlock()
-		http.Error(w, "Insufficient capacity", http.StatusInsufficientStorage)
-		return
-	}
-	tableLock.RUnlock()
-
-	// Save file
 	filePath := fmt.Sprintf("%s/%s", localFolder, fileName)
 	err = ioutil.WriteFile(filePath, body, 0644)
 	if err != nil {
@@ -237,40 +218,123 @@ func receiveFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update local table
-	updateChunkInfo(fileName, body)
-
-	fmt.Printf("[INFO] Received file: %s (Size: %.2f MB)\n",
-		fileName, float64(len(body))/(1024*1024))
+	fmt.Printf("[INFO] Received file: %s\n", fileName)
 	w.WriteHeader(http.StatusOK)
 }
 
-func updateChunkInfo(fileName string, data []byte) {
-	// Parse the chunk to get ID range
-	var records []map[string]interface{}
-	err := json.Unmarshal(data, &records)
-	if err != nil {
-		fmt.Printf("[ERROR] Failed to parse chunk data: %s\n", err)
-		return
-	}
+func commandInterface() {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Printf("\nAvailable commands (Port %d):\n", node.Port)
+	fmt.Println("1. distribute - Upload and distribute dataset")
+	fmt.Println("2. status    - Show node status")
+	fmt.Println("3. list      - List received files")
+	fmt.Println("4. exit      - Exit the program")
 
-	if len(records) == 0 {
-		return
-	}
+	for {
+		fmt.Print("\nEnter command: ")
+		command, _ := reader.ReadString('\n')
+		command = strings.TrimSpace(command)
 
-	startID := int(records[0]["id"].(float64))
-	endID := int(records[len(records)-1]["id"].(float64))
-
-	tableLock.Lock()
-	localTable.Chunks[fileName] = types.ChunkInfo{
-		ChunkID: fileName,
-		StartID: startID,
-		EndID:   endID,
-		Size:    int64(len(data)),
-		NodeID:  node.ID,
-		Status:  "active",
+		switch command {
+		case "distribute":
+			handleDistribute()
+		case "status":
+			showStatus()
+		case "list":
+			listFiles()
+		case "exit":
+			fmt.Println("[INFO] Shutting down...")
+			os.Exit(0)
+		default:
+			fmt.Println("[ERROR] Unknown command")
+		}
 	}
-	tableLock.Unlock()
 }
 
-// ... [Previous helper functions remain the same]
+func handleDistribute() {
+	fmt.Print("Enter the path to the dataset folder: ")
+	reader := bufio.NewReader(os.Stdin)
+	path, _ := reader.ReadString('\n')
+	path = strings.TrimSpace(path)
+
+	files, err := ioutil.ReadDir(path)
+	if err != nil {
+		fmt.Printf("[ERROR] Failed to read directory: %s\n", err)
+		return
+	}
+
+	fmt.Printf("[INFO] Uploading %d files to AWS...\n", len(files))
+
+	for _, file := range files {
+		if !file.IsDir() {
+			filePath := fmt.Sprintf("%s/%s", path, file.Name())
+			err := uploadFile(filePath, file.Name())
+			if err != nil {
+				fmt.Printf("[ERROR] Failed to upload %s: %s\n", file.Name(), err)
+			}
+		}
+	}
+
+	// Trigger distribution
+	_, err = http.Post(awsURL+"/distribute", "application/json", nil)
+	if err != nil {
+		fmt.Println("[ERROR] Failed to trigger distribution:", err)
+		return
+	}
+
+	fmt.Println("[INFO] Distribution initiated successfully")
+}
+
+func uploadFile(filePath, fileName string) error {
+	data, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", awsURL+"/upload", bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("File-Name", fileName)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("upload failed with status: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+func showStatus() {
+	fmt.Println("\n=== Node Status ===")
+	fmt.Printf("Node ID: %s\n", node.ID)
+	fmt.Printf("MAC Address: %s\n", node.MacID)
+	fmt.Printf("IP Address: %s\n", node.IP)
+	fmt.Printf("Port: %d\n", node.Port)
+	fmt.Printf("Status: %s\n", node.Status)
+}
+
+func listFiles() {
+	files, err := ioutil.ReadDir(localFolder)
+	if err != nil {
+		fmt.Printf("[ERROR] Failed to read directory: %s\n", err)
+		return
+	}
+
+	fmt.Printf("\n=== Received Files (Port %d) ===\n", node.Port)
+	if len(files) == 0 {
+		fmt.Println("No files received yet")
+		return
+	}
+
+	for _, file := range files {
+		size := float64(file.Size()) / 1024 // Size in KB
+		fmt.Printf("%s (%.2f KB)\n", file.Name(), size)
+	}
+}
