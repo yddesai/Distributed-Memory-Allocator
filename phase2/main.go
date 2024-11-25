@@ -327,10 +327,10 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 		return fmt.Errorf("failed to parse JSON: %v", err)
 	}
 
-	// Convert to desired structure
+	// Handle different JSON structures
 	var records []map[string]interface{}
 	switch v := rawData.(type) {
-	case []interface{}:
+	case []interface{}: // Root element is an array
 		for _, item := range v {
 			if record, ok := item.(map[string]interface{}); ok {
 				records = append(records, record)
@@ -338,8 +338,11 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 				return fmt.Errorf("unexpected JSON format: item is not an object")
 			}
 		}
+	case map[string]interface{}: // Root element is an object
+		// Flatten the object into a single record
+		records = append(records, v)
 	default:
-		return fmt.Errorf("unexpected JSON format: root element is not an array")
+		return fmt.Errorf("unexpected JSON format: root element is not an array or object")
 	}
 
 	totalRecords := len(records)
@@ -409,6 +412,7 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 
 	return nil
 }
+
 
 
 type Chunk struct {
