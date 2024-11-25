@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"phase2/config"
 	"phase2/types"
 	"strings"
@@ -211,7 +214,7 @@ func receiveFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filePath := fmt.Sprintf("%s/%s", localFolder, fileName)
+	filePath := filepath.Join(localFolder, fileName)
 	err = ioutil.WriteFile(filePath, body, 0644)
 	if err != nil {
 		http.Error(w, "Failed to save file", http.StatusInternalServerError)
@@ -251,11 +254,68 @@ func commandInterface() {
 	}
 }
 
+func uploadFile(filePath string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %v", err)
+	}
+	defer file.Close()
+
+	url := fmt.Sprintf("%s/upload", awsURL)
+
+	// Create a new buffer to read the file content
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	// Extract just the base filename
+	filename := filepath.Base(filePath)
+
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		return fmt.Errorf("failed to create form file: %v", err)
+	}
+
+	_, err = io.Copy(part, file)
+	if err != nil {
+		return fmt.Errorf("failed to copy file content: %v", err)
+	}
+
+	err = writer.Close()
+	if err != nil {
+		return fmt.Errorf("failed to close writer: %v", err)
+	}
+
+	request, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	// Set the content type header with the boundary
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	// Add File-Name header with just the filename
+	request.Header.Set("File-Name", filename)
+
+	client := &http.Client{}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(response.Body)
+		return fmt.Errorf("upload failed with status %d: %s", response.StatusCode, string(bodyBytes))
+	}
+
+	return nil
+}
+
 func handleDistribute() {
 	fmt.Print("Enter the path to the dataset folder: ")
 	reader := bufio.NewReader(os.Stdin)
 	path, _ := reader.ReadString('\n')
 	path = strings.TrimSpace(path)
+	path = strings.ReplaceAll(path, "\\", "/")
 
 	files, err := ioutil.ReadDir(path)
 	if err != nil {
@@ -263,52 +323,32 @@ func handleDistribute() {
 		return
 	}
 
-	fmt.Printf("[INFO] Uploading %d files to AWS...\n", len(files))
+	fmt.Printf("[INFO] Found %d files to upload...\n", len(files))
 
+	var successCount int
 	for _, file := range files {
 		if !file.IsDir() {
 			filePath := fmt.Sprintf("%s/%s", path, file.Name())
-			err := uploadFile(filePath, file.Name())
+			err := uploadFile(filePath)
 			if err != nil {
 				fmt.Printf("[ERROR] Failed to upload %s: %s\n", file.Name(), err)
+			} else {
+				fmt.Printf("[SUCCESS] Uploaded %s\n", file.Name())
+				successCount++
 			}
 		}
 	}
 
-	// Trigger distribution
-	_, err = http.Post(awsURL+"/distribute", "application/json", nil)
-	if err != nil {
-		fmt.Println("[ERROR] Failed to trigger distribution:", err)
-		return
+	if successCount > 0 {
+		_, err = http.Post(awsURL+"/distribute", "application/json", nil)
+		if err != nil {
+			fmt.Println("[ERROR] Failed to trigger distribution:", err)
+			return
+		}
+		fmt.Printf("[INFO] Distribution initiated successfully (%d/%d files uploaded)\n", successCount, len(files))
+	} else {
+		fmt.Println("[WARNING] No files were successfully uploaded")
 	}
-
-	fmt.Println("[INFO] Distribution initiated successfully")
-}
-
-func uploadFile(filePath, fileName string) error {
-	data, err := ioutil.ReadFile(filePath)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest("POST", awsURL+"/upload", bytes.NewBuffer(data))
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("File-Name", fileName)
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("upload failed with status: %d", resp.StatusCode)
-	}
-
-	return nil
 }
 
 func showStatus() {

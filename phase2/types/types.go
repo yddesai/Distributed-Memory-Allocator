@@ -18,12 +18,14 @@ type Node struct {
 
 // ChunkInfo stores information about data chunks
 type ChunkInfo struct {
-	ChunkID string `json:"chunk_id"`
-	StartID int    `json:"start_id"`
-	EndID   int    `json:"end_id"`
-	Size    int64  `json:"size"` // in bytes
-	NodeID  string `json:"node_id"`
-	Status  string `json:"status"`
+	ChunkID    string `json:"chunk_id"`
+	StartID    int    `json:"start_id"`
+	EndID      int    `json:"end_id"`
+	Size       int64  `json:"size"` // in bytes
+	NodeID     string `json:"node_id"`
+	Status     string `json:"status"`
+	SourcePath string `json:"source_path"`
+	FileName   string `json:"file_name"`
 }
 
 // SystemMetrics stores system-wide metrics
@@ -66,4 +68,10 @@ type QueryResponse struct {
 	Status string      `json:"status"`
 	Time   int64       `json:"time"`    // processing time in ms
 	NodeID string      `json:"node_id"` // responding node
+}
+
+type FileInfo struct {
+	Name string
+	Size int64
+	Path string
 }
