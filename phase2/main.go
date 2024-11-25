@@ -297,16 +297,19 @@ func distributeFiles() error {
 func processJSONFile(fileName string, activeNodes []types.Node) error {
 	filePath := fmt.Sprintf("%s/%s", backupFolder, fileName)
 	
-	// Read and parse JSON file
+	// Read file content
 	data, err := ioutil.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %v", err)
 	}
 
+	// Fix any invalid characters in the JSON
+	cleanData := strings.ReplaceAll(string(data), "-", "") // Remove hyphens from phone numbers
+	
 	var records []map[string]interface{}
-	err = json.Unmarshal(data, &records)
+	err = json.Unmarshal([]byte(cleanData), &records)
 	if err != nil {
-		return fmt.Errorf("failed to parse JSON: %v", err)
+		return fmt.Errorf("failed to parse JSON (even after cleaning): %v", err)
 	}
 
 	totalRecords := len(records)
