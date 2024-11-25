@@ -75,3 +75,9 @@ type FileInfo struct {
 	Size int64
 	Path string
 }
+
+// Add this new struct
+type MasterIndex struct {
+    TotalRecords int           `json:"total_records"`
+    Chunks       []ChunkInfo   `json:"chunks"`
+}

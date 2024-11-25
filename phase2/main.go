@@ -24,6 +24,10 @@ var (
 	backupFolder  = config.BACKUP_FOLDER        // Backup folder for datasets
 )
 
+const (
+	CHUNK_SIZE = 8500 // records per chunk
+)
+
 func main() {
 	// Delete old nodes.json file to start fresh
 	os.Remove("nodes.json")
@@ -270,70 +274,133 @@ func distributeFiles() error {
 		return fmt.Errorf("no active nodes available for distribution")
 	}
 
-	// Get list of files from backup folder
 	files, err := ioutil.ReadDir(backupFolder)
 	if err != nil {
 		return fmt.Errorf("failed to read backup folder: %v", err)
 	}
 
-	// Calculate total size
-	var totalSize int64
-	fileInfos := make([]types.FileInfo, 0)
+	// Process each JSON file
 	for _, file := range files {
-		if !file.IsDir() {
-			fileInfos = append(fileInfos, types.FileInfo{
-				Name: file.Name(),
-				Size: file.Size(),
-				Path: fmt.Sprintf("%s/%s", backupFolder, file.Name()),
-			})
-			totalSize += file.Size()
-		}
-	}
-
-	// Get target distribution
-	// Create chunks from files (simple 1:1 mapping for now)
-	chunks := make([]types.ChunkInfo, 0)
-	for _, file := range fileInfos {
-		chunk := types.ChunkInfo{
-			FileName:   file.Name,
-			Size:       file.Size,
-			SourcePath: file.Path,
-		}
-		chunks = append(chunks, chunk)
-	}
-
-	// Get chunk distribution
-	chunkDistribution := utils.RecalculateDistribution(chunks, activeNodes)
-
-	// Transfer files to nodes
-	for nodeID, nodeChunks := range chunkDistribution {
-		// Find node's address
-		var nodeAddr string
-		for _, node := range activeNodes {
-			if node.ID == nodeID {
-				nodeAddr = fmt.Sprintf("http://%s:%d", node.IP, node.Port)
-				break
-			}
-		}
-
-		// Transfer each chunk to the node
-		for _, chunk := range nodeChunks {
-			if err := transferFileToNode(chunk, nodeAddr); err != nil {
-				fmt.Printf("[WARNING] Failed to transfer %s to node %s: %v\n",
-					chunk.FileName, nodeID, err)
+		if !file.IsDir() && filepath.Ext(file.Name()) == ".json" {
+			err := processJSONFile(file.Name(), activeNodes)
+			if err != nil {
+				fmt.Printf("[WARNING] Failed to process %s: %v\n", file.Name(), err)
 				continue
 			}
-
-			// Update data index
-			mu.Lock()
-			dataIndex[chunk.FileName] = append(dataIndex[chunk.FileName], nodeID)
-			mu.Unlock()
-
-			fmt.Printf("[INFO] Transferred %s to node %s\n", chunk.FileName, nodeID)
 		}
 	}
 
 	return nil
+}
+
+func processJSONFile(fileName string, activeNodes []types.Node) error {
+	filePath := fmt.Sprintf("%s/%s", backupFolder, fileName)
+	
+	// Read and parse JSON file
+	data, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %v", err)
+	}
+
+	var records []map[string]interface{}
+	err = json.Unmarshal(data, &records)
+	if err != nil {
+		return fmt.Errorf("failed to parse JSON: %v", err)
+	}
+
+	totalRecords := len(records)
+	chunks := createChunks(records, totalRecords, len(activeNodes))
+
+	// Create master index
+	masterIndex := types.MasterIndex{
+		TotalRecords: totalRecords,
+		Chunks:       make([]types.ChunkInfo, 0),
+	}
+
+	// Distribute chunks to nodes
+	for i, chunk := range chunks {
+		nodeIndex := i % len(activeNodes)
+		node := activeNodes[nodeIndex]
+		
+		chunkFileName := fmt.Sprintf("%s_chunk_%d.json", strings.TrimSuffix(fileName, ".json"), i)
+		chunkPath := fmt.Sprintf("%s/%s", backupFolder, chunkFileName)
+		
+		// Save chunk to file
+		chunkData, err := json.Marshal(chunk.Records)
+		if err != nil {
+			return fmt.Errorf("failed to marshal chunk: %v", err)
+		}
+		
+		err = ioutil.WriteFile(chunkPath, chunkData, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to write chunk file: %v", err)
+		}
+
+		// Create chunk info
+		chunkInfo := types.ChunkInfo{
+			ChunkID:    fmt.Sprintf("chunk_%d", i),
+			StartID:    chunk.StartID,
+			EndID:      chunk.EndID,
+			Size:       int64(len(chunkData)),
+			NodeID:     node.ID,
+			Status:     "active",
+			SourcePath: chunkPath,
+			FileName:   chunkFileName,
+		}
+		
+		masterIndex.Chunks = append(masterIndex.Chunks, chunkInfo)
+
+		// Transfer chunk to node
+		nodeAddr := fmt.Sprintf("http://%s:%d", node.IP, node.Port)
+		err = transferFileToNode(chunkInfo, nodeAddr)
+		if err != nil {
+			fmt.Printf("[WARNING] Failed to transfer chunk to node %s: %v\n", node.ID, err)
+			continue
+		}
+
+		// Update data index
+		mu.Lock()
+		dataIndex[chunkFileName] = append(dataIndex[chunkFileName], node.ID)
+		mu.Unlock()
+	}
+
+	// Save master index
+	indexFileName := strings.TrimSuffix(fileName, ".json") + "_index.json"
+	indexPath := fmt.Sprintf("%s/%s", backupFolder, indexFileName)
+	indexData, _ := json.MarshalIndent(masterIndex, "", "  ")
+	err = ioutil.WriteFile(indexPath, indexData, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to save master index: %v", err)
+	}
+
+	return nil
+}
+
+type Chunk struct {
+	StartID  int
+	EndID    int
+	Records  []map[string]interface{}
+}
+
+func createChunks(records []map[string]interface{}, totalRecords, nodeCount int) []Chunk {
+	chunks := make([]Chunk, 0)
+	recordsPerChunk := CHUNK_SIZE
+	
+	for i := 0; i < totalRecords; i += recordsPerChunk {
+		end := i + recordsPerChunk
+		if end > totalRecords {
+			end = totalRecords
+		}
+
+		chunk := Chunk{
+			StartID: i,
+			EndID:   end - 1,
+			Records: records[i:end],
+		}
+		chunks = append(chunks, chunk)
+	}
+
+	return chunks
 }
 
 func transferFileToNode(chunk types.ChunkInfo, nodeAddr string) error {
@@ -344,7 +411,7 @@ func transferFileToNode(chunk types.ChunkInfo, nodeAddr string) error {
 	defer file.Close()
 
 	// Create request to node's upload endpoint
-	req, err := http.NewRequest("POST", nodeAddr+"/upload", file)
+	req, err := http.NewRequest("POST", nodeAddr+"/receive", file)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %v", err)
 	}
