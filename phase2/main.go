@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"regexp"
 
 	"github.com/schollz/progressbar/v3"
 )
@@ -303,13 +304,30 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 		return fmt.Errorf("failed to read file: %v", err)
 	}
 
-	// Fix any invalid characters in the JSON
-	cleanData := strings.ReplaceAll(string(data), "-", "") // Remove hyphens from phone numbers
+	// Clean and fix JSON data
+	cleanData := string(data)
+	
+	// Remove any non-printable characters
+	re := regexp.MustCompile(`[\x00-\x1F\x7F]`)
+	cleanData = re.ReplaceAllString(cleanData, "")
+	
+	// Fix common JSON issues
+	cleanData = strings.ReplaceAll(cleanData, "-", "") // Remove hyphens from phone numbers
+	cleanData = strings.ReplaceAll(cleanData, "e+", "e") // Fix scientific notation
+	cleanData = strings.ReplaceAll(cleanData, "e-", "e") // Fix scientific notation
+	cleanData = strings.ReplaceAll(cleanData, "NaN", "0") // Replace NaN with 0
+	cleanData = strings.ReplaceAll(cleanData, "Infinity", "0") // Replace Infinity with 0
 	
 	var records []map[string]interface{}
 	err = json.Unmarshal([]byte(cleanData), &records)
 	if err != nil {
-		return fmt.Errorf("failed to parse JSON (even after cleaning): %v", err)
+		// Try to parse with more lenient decoder if standard unmarshal fails
+		d := json.NewDecoder(strings.NewReader(cleanData))
+		d.UseNumber()
+		err = d.Decode(&records)
+		if err != nil {
+			return fmt.Errorf("failed to parse JSON: %v", err)
+		}
 	}
 
 	totalRecords := len(records)
@@ -330,7 +348,7 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 		chunkPath := fmt.Sprintf("%s/%s", backupFolder, chunkFileName)
 		
 		// Save chunk to file
-		chunkData, err := json.Marshal(chunk.Records)
+		chunkData, err := json.MarshalIndent(chunk.Records, "", "  ") // Use MarshalIndent for better formatting
 		if err != nil {
 			return fmt.Errorf("failed to marshal chunk: %v", err)
 		}
