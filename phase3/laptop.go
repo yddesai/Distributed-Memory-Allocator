@@ -81,29 +81,26 @@ func main() {
     }
 }
 
-func initializeNode() {
-    macID := getMacAddr()
-    macIDClean := strings.ReplaceAll(macID, ":", "") // Remove colons
+func initializeNode() bool {
+        nodeID := fmt.Sprintf("laptop-%d", time.Now().Unix()%1000)
+        macAddr := getMacAddress()
+        if macAddr == "" {
+                fmt.Println("[ERROR] Could not get MAC address")
+                return false
+        }
 
-    // Get public IP address
-    publicIP := getPublicIP()
-    if publicIP == "" {
-        fmt.Println("[ERROR] Could not retrieve public IP address.")
-        os.Exit(1)
-    }
+        node = Node{
+                ID:       nodeID,
+                Capacity: 500,
+                MacID:    macAddr,
+                IP:       getPublicIP(),
+                Port:     8081,  // Start with fixed port
+                Status:   "active",
+        }
 
-    node = Node{
-        ID:       "laptop-" + macIDClean[len(macIDClean)-4:], // Use the last 4 characters
-        MacID:    macID,
-        IP:       publicIP,
-        Port:     8081,
-        Capacity: 200, // 200MB capacity
-    }
-
-    fmt.Printf("[INFO] Initialized node: %s (MAC: %s, IP: %s, Port: %d, Capacity: %dMB)\n",
-        node.ID, node.MacID, node.IP, node.Port, node.Capacity)
-
-    registerWithAWS()
+        fmt.Printf("[INFO] Initialized node: %s (MAC: %s, IP: %s, Port: %d)\n",
+                node.ID, node.MacID, node.IP, node.Port)
+        return true
 }
 
 func getPublicIP() string {
@@ -122,45 +119,35 @@ func getPublicIP() string {
 }
 
 func registerWithAWS() {
-    url := fmt.Sprintf("http://%s:%d/register", awsIP, awsPort)
-    fmt.Printf("[INFO] Attempting to register with AWS at %s\n", url)
-    
-    data, _ := json.Marshal(node)
-    client := &http.Client{Timeout: 10 * time.Second}
-    resp, err := client.Post(url, "application/json", bytes.NewBuffer(data))
-    if err != nil {
-        fmt.Printf("[ERROR] Failed to register with AWS Coordinator: %v\n", err)
-        fmt.Println("[INFO] Please check:")
-        fmt.Println("1. AWS IP address is correct")
-        fmt.Println("2. AWS instance security group allows inbound traffic on port 8080")
-        fmt.Println("3. Network connectivity")
-        return
-    }
-    defer resp.Body.Close()
-
-    body, _ := ioutil.ReadAll(resp.Body)
-    fmt.Printf("[INFO] AWS Response: %s\n", string(body))
-}
-
-func sendHeartbeat() {
-    for {
-        time.Sleep(5 * time.Second)
-        url := fmt.Sprintf("http://%s:%d/heartbeat", awsIP, awsPort)
-        mu.Lock()
-        node.Used = totalUsedSize / 1024 // Convert KB to MB
+        fmt.Printf("[INFO] Attempting to register with AWS at %s\n", awsURL)
         data, _ := json.Marshal(node)
-        mu.Unlock()
-
-        client := &http.Client{Timeout: 5 * time.Second}
-        resp, err := client.Post(url, "application/json", bytes.NewBuffer(data))
+        client := &http.Client{Timeout: 30 * time.Second}  // Increased timeout
+        resp, err := http.Post(awsURL+"/register", "application/json", bytes.NewBuffer(data))
         if err != nil {
-            fmt.Printf("[ERROR] Failed to send heartbeat: %v\n", err)
-            continue
+                fmt.Printf("[ERROR] Failed to register with AWS: %v\n", err)
+                return
         }
-        resp.Body.Close()
-    }
+        defer resp.Body.Close()
+
+        if resp.StatusCode == http.StatusOK {
+                fmt.Printf("[INFO] Successfully registered with AWS (Port: %d)\n", node.Port)
+        } else {
+                body, _ := ioutil.ReadAll(resp.Body)
+                fmt.Printf("[ERROR] Registration failed with status: %d - %s\n", resp.StatusCode, string(body))
+        }
 }
 
+func sendHeartbeats() {
+        client := &http.Client{Timeout: 10 * time.Second}
+        for {
+                data, _ := json.Marshal(node)
+                _, err := client.Post(awsURL+"/heartbeat", "application/json", bytes.NewBuffer(data))
+                if err != nil {
+                        fmt.Printf("[ERROR] Failed to send heartbeat: %v\n", err)
+                }
+                time.Sleep(5 * time.Second)
+        }
+}
 func receiveChunk(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost {
         http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
