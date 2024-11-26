@@ -42,7 +42,7 @@ type ChunkInfo struct {
 
 var (
     node          Node
-    awsIP         = "<AWS_PUBLIC_IP>" // Replace with your AWS Coordinator's public IP
+    awsIP         = "18.144.165.108" // Replace with your AWS Coordinator's public IP
     awsPort       = 8080
     indexFile     = "index.json"
     dataFolder    = "data"
