@@ -1,7 +1,6 @@
 package main
 
 import (
-    "bufio"
     "bytes"
     "encoding/json"
     "fmt"
@@ -11,7 +10,6 @@ import (
     "os"
     "sort"
     "strconv"
-    "strings"
     "sync"
     "time"
 
@@ -412,52 +410,43 @@ func distributeChunks() error {
     // Prepare list of chunks
     chunkList := make([]ChunkInfo, 0, len(chunks))
     for _, chunk := range chunks {
-        chunkList = append(chunkList, chunk)
+        if chunk.Status == "available" {
+            chunkList = append(chunkList, chunk)
+        }
     }
 
     // Distribute chunks proportionally
     chunksAssigned := 0
-    for _, node := range activeNodes {
-        proportion := float64(node.Capacity) / float64(totalCapacity)
-        nodeChunkCount := int(math.Floor(float64(totalChunks) * proportion))
+    nodeIndex := 0
+    for chunksAssigned < len(chunkList) {
+        node := activeNodes[nodeIndex%len(activeNodes)]
+        chunk := chunkList[chunksAssigned]
 
-        if chunksAssigned+nodeChunkCount > totalChunks {
-            nodeChunkCount = totalChunks - chunksAssigned
-        }
-
-        if nodeChunkCount <= 0 {
+        err := sendChunkToNode(node, chunk)
+        if err != nil {
+            fmt.Printf("[ERROR] Failed to send chunk '%s' to node '%s': %v\n",
+                chunk.ChunkID, node.ID, err)
+            chunksAssigned++
+            bar.Add(1)
+            nodeIndex++
             continue
         }
 
-        endIdx := chunksAssigned + nodeChunkCount
-        if endIdx > len(chunkList) {
-            endIdx = len(chunkList)
-        }
+        // Update chunk location
+        mu.Lock()
+        chunk.Location = node.ID
+        chunk.Status = "assigned"
+        chunks[chunk.ChunkID] = chunk
+        mu.Unlock()
 
-        nodeChunks := chunkList[chunksAssigned:endIdx]
-        fmt.Printf("[INFO] Assigning %d chunks to node '%s'\n", len(nodeChunks), node.ID)
+        // Update dataIndex
+        mu.Lock()
+        dataIndex[node.ID] = append(dataIndex[node.ID], chunk.ChunkID)
+        mu.Unlock()
 
-        chunkIDs := []string{}
-        for _, chunk := range nodeChunks {
-            err := sendChunkToNode(node, chunk)
-            if err != nil {
-                fmt.Printf("[ERROR] Failed to send chunk '%s' to node '%s': %v\n",
-                    chunk.ChunkID, node.ID, err)
-                continue
-            }
-            chunkIDs = append(chunkIDs, chunk.ChunkID)
-
-            // Update chunk location
-            mu.Lock()
-            chunk.Location = node.ID
-            chunks[chunk.ChunkID] = chunk
-            mu.Unlock()
-
-            bar.Add(1)
-        }
-
-        dataIndex[node.ID] = chunkIDs
-        chunksAssigned += nodeChunkCount
+        bar.Add(1)
+        chunksAssigned++
+        nodeIndex++
     }
 
     fmt.Printf("[INFO] Distributed %d chunks among %d nodes\n", chunksAssigned, len(activeNodes))
@@ -557,11 +546,20 @@ func redistributeChunks() error {
 
     // Remove chunks from dataIndex
     for _, chunk := range inactiveChunks {
-        delete(dataIndex[chunk.Location], chunk.ChunkID)
+        dataIndex[chunk.Location] = removeFromSlice(dataIndex[chunk.Location], chunk.ChunkID)
     }
 
     // Distribute available chunks
     return distributeChunks()
+}
+
+func removeFromSlice(slice []string, s string) []string {
+    for i, v := range slice {
+        if v == s {
+            return append(slice[:i], slice[i+1:]...)
+        }
+    }
+    return slice
 }
 
 func getNodeByID(id string) (Node, bool) {
@@ -643,9 +641,9 @@ func getMetrics(w http.ResponseWriter, r *http.Request) {
     defer mu.RUnlock()
 
     metrics := struct {
-        TotalDataSize int           `json:"total_data_size"`
-        TotalChunks   int           `json:"total_chunks"`
-        ActiveNodes   int           `json:"active_nodes"`
+        TotalDataSize int            `json:"total_data_size"`
+        TotalChunks   int            `json:"total_chunks"`
+        ActiveNodes   int            `json:"active_nodes"`
         Nodes         map[string]Node `json:"nodes"`
     }{
         TotalDataSize: int(totalFilesSize / (1024 * 1024)), // Convert bytes to MB
