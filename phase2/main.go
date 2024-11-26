@@ -294,6 +294,24 @@ func distributeFiles() error {
 	return nil
 }
 
+func validateJSON(data []byte) error {
+    // Print first 100 characters of the file
+    preview := string(data)
+    if len(preview) > 100 {
+        preview = preview[:100] + "..."
+    }
+    fmt.Printf("File preview: %s\n", preview)
+
+    // Try to identify specific JSON errors
+    var js json.RawMessage
+    if err := json.Unmarshal(data, &js); err != nil {
+        return fmt.Errorf("JSON parsing error: %v", err)
+    }
+    
+    return nil
+}
+
+
 func processJSONFile(fileName string, activeNodes []types.Node) error {
 	// Validate input
 	if len(activeNodes) == 0 {
@@ -308,8 +326,11 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 	}
 
 	// Validate JSON format
-	if !json.Valid(data) {
-		return fmt.Errorf("invalid JSON format in file %s", fileName)
+	// if !json.Valid(data) {
+	// 	return fmt.Errorf("invalid JSON format in file %s", fileName)
+	// }
+	if err := validateJSON(data); err != nil {
+		return fmt.Errorf("JSON validation failed for %s: %w", fileName, err)
 	}
 
 	// Parse JSON into a generic structure
