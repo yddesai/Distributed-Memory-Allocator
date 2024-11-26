@@ -301,7 +301,8 @@ func validateJSON(data []byte) error {
         preview = preview[:100] + "..."
     }
     fmt.Printf("[DEBUG] File preview: %s\n", preview)
-
+    // Print the entire JSON string for debugging
+    fmt.Printf("[DEBUG] Full JSON content:\n%s\n", string(data))
     // Try to decode with number handling
     decoder := json.NewDecoder(strings.NewReader(string(data)))
     decoder.UseNumber() // Preserve number precision and handle negative numbers
