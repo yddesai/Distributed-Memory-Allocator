@@ -314,7 +314,7 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 
 	// Parse JSON into a generic structure
 	var rawData interface{}
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.UseNumber() // Preserve number precision
 	if err := decoder.Decode(&rawData); err != nil {
 		return fmt.Errorf("failed to decode JSON: %w", err)
@@ -386,7 +386,7 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 		// Transfer chunk to node
 		nodeAddr := fmt.Sprintf("http://%s:%d", node.IP, node.Port)
 		if err := transferFileToNode(chunkInfo, nodeAddr); err != nil {
-			log.Printf("[WARNING] Failed to transfer chunk to node %s: %v", node.ID, err)
+			fmt.Printf("[WARNING] Failed to transfer chunk to node %s: %v\n", node.ID, err)
 			chunkInfo.Status = "transfer_failed"
 		}
 
