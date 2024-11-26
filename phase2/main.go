@@ -295,75 +295,80 @@ func distributeFiles() error {
 }
 
 func processJSONFile(fileName string, activeNodes []types.Node) error {
-	filePath := fmt.Sprintf("%s/%s", backupFolder, fileName)
-
-	// Read file content
-	data, err := ioutil.ReadFile(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to read file: %v", err)
+	// Validate input
+	if len(activeNodes) == 0 {
+		return fmt.Errorf("no active nodes available")
 	}
 
-	// Clean and preprocess JSON data
-	cleanData := string(data)
+	// Construct file path and read file
+	filePath := filepath.Join(backupFolder, fileName)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read file %s: %w", filePath, err)
+	}
 
 	// Validate JSON format
-	if !json.Valid([]byte(cleanData)) {
-		return fmt.Errorf("invalid JSON format")
+	if !json.Valid(data) {
+		return fmt.Errorf("invalid JSON format in file %s", fileName)
 	}
 
 	// Parse JSON into a generic structure
 	var rawData interface{}
-	decoder := json.NewDecoder(strings.NewReader(cleanData))
-	decoder.UseNumber()
-	err = decoder.Decode(&rawData)
-	if err != nil {
-		return fmt.Errorf("failed to parse JSON: %v", err)
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber() // Preserve number precision
+	if err := decoder.Decode(&rawData); err != nil {
+		return fmt.Errorf("failed to decode JSON: %w", err)
 	}
 
+	// Convert to records based on JSON structure
 	var records []map[string]interface{}
-
 	switch v := rawData.(type) {
 	case []interface{}: // Root is an array
-		for _, item := range v {
-			if record, ok := item.(map[string]interface{}); ok {
-				records = append(records, record)
-			} else {
-				return fmt.Errorf("unexpected JSON format: item is not an object")
+		records = make([]map[string]interface{}, 0, len(v))
+		for i, item := range v {
+			record, ok := item.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("invalid record at index %d: expected object", i)
 			}
+			records = append(records, record)
 		}
 	case map[string]interface{}: // Root is an object
-		// Wrap the object into an array for consistency
-		records = append(records, v)
+		records = []map[string]interface{}{v}
 	default:
-		return fmt.Errorf("unexpected JSON format: root element is not an array or object")
+		return fmt.Errorf("unexpected JSON format: root must be array or object")
 	}
 
+	if len(records) == 0 {
+		return fmt.Errorf("no valid records found in file %s", fileName)
+	}
+
+	// Create chunks and initialize master index
 	totalRecords := len(records)
 	chunks := createChunks(records, totalRecords, len(activeNodes))
-
-	// Create master index
 	masterIndex := types.MasterIndex{
 		TotalRecords: totalRecords,
-		Chunks:       make([]types.ChunkInfo, 0),
+		Chunks:       make([]types.ChunkInfo, 0, len(chunks)),
 	}
 
-	// Distribute chunks to nodes
+	// Process each chunk
 	for i, chunk := range chunks {
 		nodeIndex := i % len(activeNodes)
 		node := activeNodes[nodeIndex]
 
-		chunkFileName := fmt.Sprintf("%s_chunk_%d.json", strings.TrimSuffix(fileName, ".json"), i)
-		chunkPath := fmt.Sprintf("%s/%s", backupFolder, chunkFileName)
+		// Prepare chunk file name and path
+		baseFileName := strings.TrimSuffix(fileName, ".json")
+		chunkFileName := fmt.Sprintf("%s_chunk_%d.json", baseFileName, i)
+		chunkPath := filepath.Join(backupFolder, chunkFileName)
 
-		// Save chunk to file
+		// Marshal chunk data
 		chunkData, err := json.MarshalIndent(chunk.Records, "", "  ")
 		if err != nil {
-			return fmt.Errorf("failed to marshal chunk: %v", err)
+			return fmt.Errorf("failed to marshal chunk %d: %w", i, err)
 		}
 
-		err = ioutil.WriteFile(chunkPath, chunkData, 0644)
-		if err != nil {
-			return fmt.Errorf("failed to write chunk file: %v", err)
+		// Write chunk to file
+		if err := os.WriteFile(chunkPath, chunkData, 0644); err != nil {
+			return fmt.Errorf("failed to write chunk file %s: %w", chunkPath, err)
 		}
 
 		// Create chunk info
@@ -378,17 +383,16 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 			FileName:   chunkFileName,
 		}
 
-		masterIndex.Chunks = append(masterIndex.Chunks, chunkInfo)
-
 		// Transfer chunk to node
 		nodeAddr := fmt.Sprintf("http://%s:%d", node.IP, node.Port)
-		err = transferFileToNode(chunkInfo, nodeAddr)
-		if err != nil {
-			fmt.Printf("[WARNING] Failed to transfer chunk to node %s: %v\n", node.ID, err)
-			continue
+		if err := transferFileToNode(chunkInfo, nodeAddr); err != nil {
+			log.Printf("[WARNING] Failed to transfer chunk to node %s: %v", node.ID, err)
+			chunkInfo.Status = "transfer_failed"
 		}
 
-		// Update data index
+		masterIndex.Chunks = append(masterIndex.Chunks, chunkInfo)
+
+		// Update data index thread-safely
 		mu.Lock()
 		dataIndex[chunkFileName] = append(dataIndex[chunkFileName], node.ID)
 		mu.Unlock()
@@ -396,18 +400,18 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 
 	// Save master index
 	indexFileName := strings.TrimSuffix(fileName, ".json") + "_index.json"
-	indexPath := fmt.Sprintf("%s/%s", backupFolder, indexFileName)
-	indexData, _ := json.MarshalIndent(masterIndex, "", "  ")
-	err = ioutil.WriteFile(indexPath, indexData, 0644)
+	indexPath := filepath.Join(backupFolder, indexFileName)
+	indexData, err := json.MarshalIndent(masterIndex, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to save master index: %v", err)
+		return fmt.Errorf("failed to marshal master index: %w", err)
+	}
+
+	if err := os.WriteFile(indexPath, indexData, 0644); err != nil {
+		return fmt.Errorf("failed to save master index: %w", err)
 	}
 
 	return nil
 }
-
-
-
 
 
 type Chunk struct {
