@@ -157,84 +157,52 @@ func saveMasterIndex() {
 }
 
 func registerNode(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodPost {
-        http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
-        return
-    }
+   if r.Method != http.MethodPost {
+                http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
+                return
+        }
 
-    var node Node
-    err := json.NewDecoder(r.Body).Decode(&node)
-    if err != nil {
-        http.Error(w, "Invalid JSON data", http.StatusBadRequest)
-        return
-    }
+        var node Node
+        err := json.NewDecoder(r.Body).Decode(&node)
+        if err != nil {
+                http.Error(w, "Invalid JSON data", http.StatusBadRequest)
+                return
+        }
 
-    // Remove overriding of node.IP
-    // Trust the IP provided by the node
-    /*
-    ip, _, err := net.SplitHostPort(r.RemoteAddr)
-    if err == nil {
-        node.IP = ip
-    }
-    */
+        mu.Lock()
+        node.Status = "active"
+        node.LastSeen = time.Now()
+        nodes[node.MacID] = node         // Using MacID as key
+        lastHeartbeat[node.MacID] = time.Now().Unix()
+        saveNodesToFile()
+        mu.Unlock()
 
-    mu.Lock()
-    defer mu.Unlock()
-
-    node.Status = "active"
-    node.LastSeen = time.Now()
-    nodes[node.ID] = node
-    lastHeartbeat[node.ID] = time.Now().Unix()
-    saveNodesToFile()
-
-    fmt.Printf("[INFO] New node registered: %s (IP: %s, Port: %d, Capacity: %dMB)\n",
-        node.ID, node.IP, node.Port, node.Capacity)
+        fmt.Printf("\n[INFO] New device connected: %s (IP:%s Port:%d)\n", 
+                node.ID, node.IP, node.Port)
+        printConnectedDevices()
 }
 
 func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost {
-        http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
-        return
-    }
+                http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
+                return
+        }
 
-    var node Node
-    err := json.NewDecoder(r.Body).Decode(&node)
-    if err != nil {
-        http.Error(w, "Invalid JSON data", http.StatusBadRequest)
-        return
-    }
+        var node Node
+        err := json.NewDecoder(r.Body).Decode(&node)
+        if err != nil {
+                http.Error(w, "Invalid JSON data", http.StatusBadRequest)
+                return
+        }
 
-    // Remove overriding of node.IP
-    // Trust the IP provided by the node
-    /*
-    ip, _, err := net.SplitHostPort(r.RemoteAddr)
-    if err == nil {
-        node.IP = ip
-    }
-    */
-
-    mu.Lock()
-    defer mu.Unlock()
-
-    if existingNode, exists := nodes[node.ID]; exists {
-        existingNode.LastSeen = time.Now()
-        existingNode.Status = "active"
-        existingNode.IP = node.IP
-        existingNode.Port = node.Port
-        existingNode.Used = node.Used
-        nodes[node.ID] = existingNode
-        lastHeartbeat[node.ID] = time.Now().Unix()
-        saveNodesToFile()
-    } else {
-        // If node is not registered, register it
-        node.Status = "active"
-        node.LastSeen = time.Now()
-        nodes[node.ID] = node
-        lastHeartbeat[node.ID] = time.Now().Unix()
-        saveNodesToFile()
-        fmt.Printf("[INFO] New node registered via heartbeat: %s (IP: %s, Port: %d, Capacity: %dMB)\n",
-            node.ID, node.IP, node.Port, node.Capacity)
-    }
+        mu.Lock()
+        if _, exists := nodes[node.MacID] {  // Check by MacID
+                node.Status = "active"
+                node.LastSeen = time.Now()
+                nodes[node.MacID] = node
+                lastHeartbeat[node.MacID] = time.Now().Unix()
+        }
+        mu.Unlock()
 }
 
 func uploadFiles(w http.ResponseWriter, r *http.Request) {
