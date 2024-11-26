@@ -391,3 +391,96 @@ func getNodeByID(id string) *Node {
 	}
 	return nil
 }
+
+func distributeData(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+                http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
+                return
+        }
+
+        fmt.Println("[INFO] Starting data distribution...")
+        printSystemMetrics()
+
+        err := distributeFiles()
+        if err != nil {
+                http.Error(w, "Failed to distribute dataset: "+err.Error(), http.StatusInternalServerError)
+                return
+        }
+
+        fmt.Println("[INFO] Dataset distribution completed.")
+        printSystemMetrics()
+        fmt.Fprintf(w, "Dataset distribution completed.")
+}
+
+func distributeFiles() error {
+        mu.Lock()
+        defer mu.Unlock()
+
+        files, err := ioutil.ReadDir(backupFolder)
+        if err != nil {
+                return fmt.Errorf("failed to read backup folder: %s", err)
+        }
+
+        // Get active nodes
+        activeNodes := []Node{}
+        totalCapacity := 0
+        for _, node := range nodes {
+                if node.Status == "active" {
+                        activeNodes = append(activeNodes, node)
+                        totalCapacity += node.Capacity
+                }
+        }
+
+        if len(activeNodes) == 0 {
+                return fmt.Errorf("no active nodes available")
+        }
+
+        // Calculate proportional distribution
+        totalFiles := len(files)
+        bar := progressbar.Default(int64(totalFiles))
+        
+        // Clear previous distribution
+        dataIndex = make(map[string][]string)
+
+        // Distribute files proportionally
+        filesProcessed := 0
+        for _, node := range activeNodes {
+                proportion := float64(node.Capacity) / float64(totalCapacity)
+                nodeFileCount := int(math.Floor(float64(totalFiles) * proportion))
+                
+                if filesProcessed + nodeFileCount > totalFiles {
+                        nodeFileCount = totalFiles - filesProcessed
+                }
+
+                if nodeFileCount <= 0 {
+                        continue
+                }
+
+                endIdx := filesProcessed + nodeFileCount
+                if endIdx > len(files) {
+                        endIdx = len(files)
+                }
+
+                nodeFiles := files[filesProcessed:endIdx]
+                fmt.Printf("[INFO] Sending %d files to %s (IP:%s Port:%d)\n", 
+                        len(nodeFiles), node.ID, node.IP, node.Port)
+
+                fileNames := []string{}
+                for _, file := range nodeFiles {
+                        err := sendFileToNode(node, file.Name())
+                        if err != nil {
+                                fmt.Printf("[ERROR] Failed to send %s to %s: %s\n", 
+                                        file.Name(), node.ID, err)
+                                continue
+                        }
+                        fileNames = append(fileNames, file.Name())
+                        bar.Add(1)
+                }
+                
+                dataIndex[node.MacID] = fileNames
+                filesProcessed += nodeFileCount
+        }
+
+        fmt.Printf("[INFO] Distributed %d files among %d nodes\n", filesProcessed, len(activeNodes))
+        return nil
+}
