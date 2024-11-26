@@ -1,16 +1,18 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"net/http"
-	"os"
-	"strings"
-	"sync"
-	"time"
+        "bytes"
+        "encoding/json"
+        "fmt"
+        "io/ioutil"
+        "net/http"
+        "os"
+        "sync"
+        "time"
+        "strings"
+        "math"
+        "github.com/schollz/progressbar/v3"
 )
-
 // Node structure
 type Node struct {
 	ID       string    `json:"id"`
@@ -482,5 +484,39 @@ func distributeFiles() error {
         }
 
         fmt.Printf("[INFO] Distributed %d files among %d nodes\n", filesProcessed, len(activeNodes))
+        return nil
+}
+
+func sendFileToNode(node Node, fileName string) error {
+        data, err := ioutil.ReadFile(backupFolder + "/" + fileName)
+        if err != nil {
+                return fmt.Errorf("failed to read file '%s': %s", fileName, err)
+        }
+
+        url := fmt.Sprintf("http://%s:%d/receive", node.IP, node.Port)
+        req, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
+        if err != nil {
+                return err
+        }
+
+        req.Header.Set("File-Name", fileName)
+        client := &http.Client{Timeout: 30 * time.Second}
+        
+        resp, err := client.Do(req)
+        if err != nil {
+                return err
+        }
+        defer resp.Body.Close()
+
+        if resp.StatusCode != http.StatusOK {
+                return fmt.Errorf("node returned status code %d", resp.StatusCode)
+        }
+
+        // Update node's used space
+        mu.Lock()
+        node.Used += len(data) / (1024 * 1024) // Convert bytes to MB
+        nodes[node.MacID] = node
+        mu.Unlock()
+
         return nil
 }
