@@ -375,8 +375,28 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 	// Parse JSON into a generic structure
 	var rawData interface{}
 	decoder := json.NewDecoder(strings.NewReader(string(cleanData)))
-	decoder.UseNumber() // Preserve number precision
+	decoder.UseNumber() // Preserve number precision and handle negative numbers
 	if err := decoder.Decode(&rawData); err != nil {
+		// Get more context around the error location
+		offset := 0
+		if jsonErr, ok := err.(*json.SyntaxError); ok {
+			offset = int(jsonErr.Offset)
+		}
+
+		// Show the problematic section
+		context := string(cleanData)
+		if offset > 0 {
+			start := offset - 20
+			if start < 0 {
+				start = 0
+			}
+			end := offset + 20
+			if end > len(context) {
+				end = len(context)
+			}
+			return fmt.Errorf("failed to decode JSON near position %d: %v\nContext: ...%s...",
+				offset, err, context[start:end])
+		}
 		return fmt.Errorf("failed to decode JSON: %w", err)
 	}
 
