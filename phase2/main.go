@@ -295,16 +295,39 @@ func distributeFiles() error {
 }
 
 func validateJSON(data []byte) error {
-    // Print first 100 characters of the file
+    // Print first 100 characters of the file for debugging
     preview := string(data)
     if len(preview) > 100 {
         preview = preview[:100] + "..."
     }
-    fmt.Printf("File preview: %s\n", preview)
+    fmt.Printf("[DEBUG] File preview: %s\n", preview)
 
-    // Try to identify specific JSON errors
-    var js json.RawMessage
-    if err := json.Unmarshal(data, &js); err != nil {
+    // Try to decode with number handling
+    decoder := json.NewDecoder(strings.NewReader(string(data)))
+    decoder.UseNumber() // Preserve number precision and handle negative numbers
+
+    var js interface{}
+    if err := decoder.Decode(&js); err != nil {
+        // Get more context around the error location
+        offset := 0
+        if jsonErr, ok := err.(*json.SyntaxError); ok {
+            offset = int(jsonErr.Offset)
+        }
+        
+        // Show the problematic section
+        context := string(data)
+        if offset > 0 {
+            start := offset - 20
+            if start < 0 {
+                start = 0
+            }
+            end := offset + 20
+            if end > len(context) {
+                end = len(context)
+            }
+            return fmt.Errorf("JSON parsing error near position %d: %v\nContext: ...%s...", 
+                offset, err, context[start:end])
+        }
         return fmt.Errorf("JSON parsing error: %v", err)
     }
     
