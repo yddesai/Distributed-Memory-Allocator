@@ -2,6 +2,7 @@
 package main
 
 import (
+    "bufio"
     "bytes"
     "encoding/json"
     "fmt"
@@ -82,12 +83,35 @@ func main() {
 
 func initializeNode() {
     macID := getMacAddr()
-    ip := getLocalIP()
+    macIDClean := strings.ReplaceAll(macID, ":", "") // Remove colons
+
+    // Use Ngrok to get public URL
+    ngrokURL := getNgrokURL()
+    if ngrokURL == "" {
+        fmt.Println("[ERROR] Could not retrieve Ngrok URL. Make sure Ngrok is running.")
+        os.Exit(1)
+    }
+
+    // Extract hostname and port from Ngrok URL
+    ngrokHostPort := strings.TrimPrefix(ngrokURL, "http://")
+    ngrokHostPort = strings.TrimPrefix(ngrokHostPort, "https://")
+    host, portStr, err := net.SplitHostPort(ngrokHostPort)
+    if err != nil {
+        // If port is not specified, default to 80 for HTTP or 443 for HTTPS
+        host = ngrokHostPort
+        if strings.HasPrefix(ngrokURL, "https://") {
+            portStr = "443"
+        } else {
+            portStr = "80"
+        }
+    }
+    port, _ := strconv.Atoi(portStr)
+
     node = Node{
-        ID:       "laptop-" + macID[len(macID)-3:], // For simplicity
+        ID:       "laptop-" + macIDClean[len(macIDClean)-4:], // Use the last 4 characters
         MacID:    macID,
-        IP:       ip,
-        Port:     8081,
+        IP:       host,
+        Port:     port,
         Capacity: 200, // 200MB capacity
     }
 
@@ -97,10 +121,42 @@ func initializeNode() {
     registerWithAWS()
 }
 
+func getNgrokURL() string {
+    resp, err := http.Get("http://localhost:4040/api/tunnels")
+    if err != nil {
+        fmt.Printf("[ERROR] Could not connect to Ngrok API: %v\n", err)
+        return ""
+    }
+    defer resp.Body.Close()
+
+    var result map[string]interface{}
+    data, _ := ioutil.ReadAll(resp.Body)
+    err = json.Unmarshal(data, &result)
+    if err != nil {
+        fmt.Printf("[ERROR] Failed to parse Ngrok API response: %v\n", err)
+        return ""
+    }
+
+    tunnels, ok := result["tunnels"].([]interface{})
+    if !ok {
+        fmt.Println("[ERROR] No tunnels found in Ngrok API response.")
+        return ""
+    }
+
+    for _, t := range tunnels {
+        tunnel := t.(map[string]interface{})
+        if proto, ok := tunnel["proto"].(string); ok && proto == "https" {
+            return tunnel["public_url"].(string)
+        }
+    }
+    return ""
+}
+
 func registerWithAWS() {
     url := fmt.Sprintf("http://%s:%d/register", awsIP, awsPort)
     data, _ := json.Marshal(node)
-    resp, err := http.Post(url, "application/json", bytes.NewBuffer(data))
+    client := &http.Client{Timeout: 10 * time.Second} // Add a timeout
+    resp, err := client.Post(url, "application/json", bytes.NewBuffer(data))
     if err != nil {
         fmt.Printf("[ERROR] Failed to register with AWS Coordinator: %v\n", err)
         return
@@ -123,7 +179,8 @@ func sendHeartbeat() {
         data, _ := json.Marshal(node)
         mu.Unlock()
 
-        resp, err := http.Post(url, "application/json", bytes.NewBuffer(data))
+        client := &http.Client{Timeout: 5 * time.Second}
+        resp, err := client.Post(url, "application/json", bytes.NewBuffer(data))
         if err != nil {
             fmt.Printf("[ERROR] Failed to send heartbeat: %v\n", err)
             continue
@@ -158,8 +215,25 @@ func receiveChunk(w http.ResponseWriter, r *http.Request) {
     }
 
     // Update stored chunks
-    var chunkInfo ChunkInfo
-    json.Unmarshal(data, &chunkInfo)
+    var records []map[string]interface{}
+    err = json.Unmarshal(data, &records)
+    if err != nil {
+        // Handle error if necessary
+    }
+
+    chunkInfo := ChunkInfo{
+        ChunkID:  fileName,
+        Size:     len(data) / 1024, // Convert bytes to KB
+        Status:   "stored",
+        FileName: fileName,
+    }
+    if len(records) > 0 {
+        startID := parseInt(fmt.Sprintf("%v", records[0]["id"]))
+        endID := parseInt(fmt.Sprintf("%v", records[len(records)-1]["id"]))
+        chunkInfo.IDRange.Start = startID
+        chunkInfo.IDRange.End = endID
+    }
+
     mu.Lock()
     storedChunks[fileName] = chunkInfo
     totalUsedSize += len(data) / 1024 // Convert bytes to KB
@@ -265,10 +339,13 @@ func startCLI() {
     fmt.Println("\nWelcome to the Distributed Memory Allocator Node Interface")
     fmt.Println("Type 'help' to see available commands.\n")
 
+    reader := bufio.NewReader(os.Stdin)
+
     for {
         fmt.Print("> ")
-        var input string
-        fmt.Scanln(&input)
+        input, _ := reader.ReadString('\n')
+        input = strings.TrimSpace(input)
+
         switch strings.ToLower(input) {
         case "help":
             fmt.Println("Available commands:")
@@ -293,8 +370,9 @@ func startCLI() {
 
 func handleDistribute() {
     fmt.Print("Enter the path to the dataset folder: ")
-    var path string
-    fmt.Scanln(&path)
+    reader := bufio.NewReader(os.Stdin)
+    path, _ := reader.ReadString('\n')
+    path = strings.TrimSpace(path)
 
     files, err := ioutil.ReadDir(path)
     if err != nil {
@@ -332,22 +410,25 @@ func handleDistribute() {
 
     // Initiate distribution
     url := fmt.Sprintf("http://%s:%d/distribute", awsIP, awsPort)
-    resp, err := http.Post(url, "application/json", nil)
+    client := &http.Client{Timeout: 30 * time.Second}
+    resp, err := client.Post(url, "application/json", nil)
     if err != nil {
         fmt.Printf("[ERROR] Failed to initiate distribution: %v\n", err)
         return
     }
     resp.Body.Close()
-    fmt.Println("[INFO] Distribution initiated.")
+    fmt.Println("\n[INFO] Distribution initiated.")
 }
 
 func handleQueryCLI() {
     fmt.Print("Enter the ID to query: ")
-    var id string
-    fmt.Scanln(&id)
+    reader := bufio.NewReader(os.Stdin)
+    id, _ := reader.ReadString('\n')
+    id = strings.TrimSpace(id)
 
     url := fmt.Sprintf("http://%s:%d/query?id=%s", awsIP, awsPort, id)
-    resp, err := http.Get(url)
+    client := &http.Client{Timeout: 10 * time.Second}
+    resp, err := client.Get(url)
     if err != nil {
         fmt.Printf("[ERROR] Failed to query AWS Coordinator: %v\n", err)
         return
@@ -372,23 +453,6 @@ func showMetrics() {
     mu.Lock()
     fmt.Printf("[INFO] Total chunks stored: %d, Total size used: %d KB\n", len(storedChunks), totalUsedSize)
     mu.Unlock()
-}
-
-func getLocalIP() string {
-    var ip string
-    addrs, err := net.InterfaceAddrs()
-    if err != nil {
-        return ""
-    }
-    for _, addr := range addrs {
-        if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-            if ipnet.IP.To4() != nil {
-                ip = ipnet.IP.String()
-                break
-            }
-        }
-    }
-    return ip
 }
 
 func getMacAddr() string {
