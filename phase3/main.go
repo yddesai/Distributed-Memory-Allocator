@@ -1,3 +1,4 @@
+// main.go
 package main
 
 import (
@@ -5,6 +6,7 @@ import (
     "encoding/json"
     "fmt"
     "io/ioutil"
+    "net"
     "net/http"
     "os"
     "sort"
@@ -15,58 +17,65 @@ import (
     "github.com/schollz/progressbar/v3"
 )
 
-// Node structure
 type Node struct {
     ID       string    `json:"id"`
-    Capacity int       `json:"capacity"` // in MB
-    Used     int       `json:"used"`     // in MB
     MacID    string    `json:"mac_id"`
     IP       string    `json:"ip"`
     Port     int       `json:"port"`
+    Capacity int       `json:"capacity"` // in MB
+    Used     int       `json:"used"`     // in MB
     Status   string    `json:"status"`
     LastSeen time.Time `json:"last_seen"`
 }
 
-// ChunkInfo stores information about each data chunk
 type ChunkInfo struct {
     ChunkID  string `json:"chunk_id"`
+    Size     int    `json:"size"` // in KB
+    Status   string `json:"status"`
+    FileName string `json:"file_name"`
+    Location string `json:"location"`
     IDRange  struct {
         Start int `json:"start"`
         End   int `json:"end"`
     } `json:"id_range"`
-    Size     int    `json:"size"`     // in KB
-    Location string `json:"location"` // Node ID
-    Status   string `json:"status"`
-    FileName string `json:"file_name"`
-}
-
-type MasterIndex struct {
-    Chunks map[string]ChunkInfo `json:"chunks"`
 }
 
 var (
-    nodes            = make(map[string]Node)      // Node registry
-    chunks           = make(map[string]ChunkInfo) // Chunk registry
-    lastHeartbeat    = make(map[string]int64)     // Last heartbeat time
-    dataIndex        = make(map[string][]string)  // Node ID to chunks mapping
-    masterIndex      = MasterIndex{Chunks: make(map[string]ChunkInfo)}
-    totalFilesSize   int64                        // Total size of files received
-    mu               sync.RWMutex                 // Mutex for thread-safe access
-    backupFolder     = "aws_backup"               // Backup folder for datasets
-    nodeInfoFile     = "nodes.json"
+    nodes          = make(map[string]Node)
+    lastHeartbeat  = make(map[string]int64)
+    chunks         = make(map[string]ChunkInfo)
+    dataIndex      = make(map[string][]string)
+    totalFilesSize int64
+    mu             sync.RWMutex
+
+    backupFolder     = "aws_backup"
+    nodesFile        = "nodes.json"
     masterIndexFile  = "master_index.json"
-    heartbeatTimeout = 15 // Seconds
+    heartbeatTimeout = 15 // in seconds
 )
 
 func main() {
-    // Ensure backup folder exists
-    ensureFolder(backupFolder)
-
     fmt.Println("[INFO] AWS Coordinator starting...")
-    loadNodesFromFile()
-    loadMasterIndex()
 
-    // Setup HTTP handlers
+    // Create backup folder if not exists
+    if _, err := os.Stat(backupFolder); os.IsNotExist(err) {
+        os.Mkdir(backupFolder, 0755)
+    }
+
+    // Load existing nodes
+    if err := loadNodesFromFile(); err != nil {
+        fmt.Println("[INFO] No saved nodes found, starting fresh.")
+    }
+
+    // Load existing master index
+    if err := loadMasterIndex(); err != nil {
+        fmt.Println("[INFO] No saved master index found, starting fresh.")
+    }
+
+    // Start node monitor
+    go monitorNodes()
+
+    // Set up HTTP handlers
     http.HandleFunc("/register", registerNode)
     http.HandleFunc("/heartbeat", handleHeartbeat)
     http.HandleFunc("/upload", uploadFiles)
@@ -74,84 +83,77 @@ func main() {
     http.HandleFunc("/query", handleQuery)
     http.HandleFunc("/metrics", getMetrics)
 
-    // Start background tasks
-    go monitorNodes()
-
     fmt.Println("[INFO] AWS Coordinator running on port 8080...")
-    err := http.ListenAndServe(":8080", nil)
-    if err != nil {
+    if err := http.ListenAndServe(":8080", nil); err != nil {
         fmt.Printf("[ERROR] Failed to start server: %v\n", err)
-        os.Exit(1)
     }
 }
 
-func ensureFolder(folderName string) {
-    if _, err := os.Stat(folderName); os.IsNotExist(err) {
-        err := os.Mkdir(folderName, 0755)
-        if err != nil {
-            fmt.Printf("[ERROR] Failed to create folder '%s': %v\n", folderName, err)
-            os.Exit(1)
-        } else {
-            fmt.Printf("[INFO] Folder '%s' created.\n", folderName)
-        }
-    }
-}
-
-func loadNodesFromFile() {
-    data, err := ioutil.ReadFile(nodeInfoFile)
+func loadNodesFromFile() error {
+    data, err := ioutil.ReadFile(nodesFile)
     if err != nil {
-        fmt.Println("[INFO] No saved nodes found, starting fresh.")
-        return
+        return err
     }
 
-    err = json.Unmarshal(data, &nodes)
+    var savedNodes map[string]Node
+    err = json.Unmarshal(data, &savedNodes)
     if err != nil {
-        fmt.Printf("[ERROR] Error loading nodes from file: %v\n", err)
-        return
+        return err
     }
-    fmt.Printf("[INFO] Loaded %d nodes from file.\n", len(nodes))
+
+    mu.Lock()
+    nodes = savedNodes
+    mu.Unlock()
+
+    return nil
 }
 
 func saveNodesToFile() {
+    mu.RLock()
     data, err := json.MarshalIndent(nodes, "", "  ")
+    mu.RUnlock()
     if err != nil {
-        fmt.Printf("[ERROR] Error marshalling nodes: %v\n", err)
+        fmt.Printf("[ERROR] Failed to marshal nodes data: %v\n", err)
         return
     }
 
-    err = ioutil.WriteFile(nodeInfoFile, data, 0644)
+    err = ioutil.WriteFile(nodesFile, data, 0644)
     if err != nil {
-        fmt.Printf("[ERROR] Error writing nodes to file: %v\n", err)
+        fmt.Printf("[ERROR] Failed to write nodes data to file: %v\n", err)
     }
 }
 
-func loadMasterIndex() {
+func loadMasterIndex() error {
     data, err := ioutil.ReadFile(masterIndexFile)
     if err != nil {
-        fmt.Println("[INFO] No saved master index found, starting fresh.")
-        return
+        return err
     }
 
-    err = json.Unmarshal(data, &masterIndex)
+    var savedChunks map[string]ChunkInfo
+    err = json.Unmarshal(data, &savedChunks)
     if err != nil {
-        fmt.Printf("[ERROR] Error loading master index from file: %v\n", err)
-        return
+        return err
     }
-    chunks = masterIndex.Chunks
-    fmt.Printf("[INFO] Loaded master index with %d chunks.\n", len(chunks))
+
+    mu.Lock()
+    chunks = savedChunks
+    mu.Unlock()
+
+    return nil
 }
 
 func saveMasterIndex() {
-    masterIndex.Chunks = chunks
-    data, err := json.MarshalIndent(masterIndex, "", "  ")
+    mu.RLock()
+    data, err := json.MarshalIndent(chunks, "", "  ")
+    mu.RUnlock()
     if err != nil {
-        fmt.Printf("[ERROR] Error marshalling master index: %v\n", err)
+        fmt.Printf("[ERROR] Failed to marshal master index data: %v\n", err)
         return
     }
 
     err = ioutil.WriteFile(masterIndexFile, data, 0644)
     if err != nil {
-        fmt.Printf("[ERROR] Error writing master index to file: %v\n", err)
+        fmt.Printf("[ERROR] Failed to write master index to file: %v\n", err)
     }
 }
 
@@ -166,6 +168,12 @@ func registerNode(w http.ResponseWriter, r *http.Request) {
     if err != nil {
         http.Error(w, "Invalid JSON data", http.StatusBadRequest)
         return
+    }
+
+    // Extract the public IP from the request
+    ip, _, err := net.SplitHostPort(r.RemoteAddr)
+    if err == nil {
+        node.IP = ip
     }
 
     mu.Lock()
@@ -194,6 +202,12 @@ func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // Extract the public IP from the request
+    ip, _, err := net.SplitHostPort(r.RemoteAddr)
+    if err == nil {
+        node.IP = ip
+    }
+
     mu.Lock()
     defer mu.Unlock()
 
@@ -206,6 +220,15 @@ func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
         nodes[node.MacID] = existingNode
         lastHeartbeat[node.MacID] = time.Now().Unix()
         saveNodesToFile()
+    } else {
+        // If node is not registered, register it
+        node.Status = "active"
+        node.LastSeen = time.Now()
+        nodes[node.MacID] = node
+        lastHeartbeat[node.MacID] = time.Now().Unix()
+        saveNodesToFile()
+        fmt.Printf("[INFO] New node registered via heartbeat: %s (IP: %s, Port: %d, Capacity: %dMB)\n",
+            node.ID, node.IP, node.Port, node.Capacity)
     }
 }
 
@@ -252,6 +275,7 @@ func distributeData(w http.ResponseWriter, r *http.Request) {
     err := processAndDistributeFiles()
     if err != nil {
         http.Error(w, "Failed to distribute dataset: "+err.Error(), http.StatusInternalServerError)
+        fmt.Printf("[ERROR] Failed to distribute dataset: %v\n", err)
         return
     }
 
@@ -388,12 +412,10 @@ func processAndDistributeFiles() error {
 func distributeChunks() error {
     // Get active nodes
     activeNodes := []Node{}
-    totalCapacity := 0
     mu.RLock()
     for _, node := range nodes {
         if node.Status == "active" {
             activeNodes = append(activeNodes, node)
-            totalCapacity += node.Capacity
         }
     }
     mu.RUnlock()
@@ -401,10 +423,6 @@ func distributeChunks() error {
     if len(activeNodes) == 0 {
         return fmt.Errorf("no active nodes available")
     }
-
-    // Calculate proportional distribution
-    totalChunks := len(chunks)
-    bar := progressbar.Default(int64(totalChunks))
 
     // Prepare list of chunks
     chunkList := make([]ChunkInfo, 0, len(chunks))
@@ -414,10 +432,13 @@ func distributeChunks() error {
         }
     }
 
-    // Distribute chunks proportionally
+    totalChunks := len(chunkList)
+    bar := progressbar.Default(int64(totalChunks))
+
+    // Distribute chunks in a round-robin fashion
     chunksAssigned := 0
     nodeIndex := 0
-    for chunksAssigned < len(chunkList) {
+    for chunksAssigned < totalChunks {
         node := activeNodes[nodeIndex%len(activeNodes)]
         chunk := chunkList[chunksAssigned]
 
@@ -425,8 +446,7 @@ func distributeChunks() error {
         if err != nil {
             fmt.Printf("[ERROR] Failed to send chunk '%s' to node '%s': %v\n",
                 chunk.ChunkID, node.ID, err)
-            chunksAssigned++
-            bar.Add(1)
+            // Optionally, mark the node as inactive or skip to next node
             nodeIndex++
             continue
         }
@@ -615,6 +635,7 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
     resp, err := http.Get(url)
     if err != nil {
         http.Error(w, "Failed to retrieve data from node", http.StatusInternalServerError)
+        fmt.Printf("[ERROR] Failed to retrieve data from node '%s': %v\n", targetNode.ID, err)
         return
     }
     defer resp.Body.Close()
@@ -623,6 +644,7 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
     data, err := ioutil.ReadAll(resp.Body)
     if err != nil {
         http.Error(w, "Failed to read response from node", http.StatusInternalServerError)
+        fmt.Printf("[ERROR] Failed to read response from node '%s': %v\n", targetNode.ID, err)
         return
     }
 
@@ -640,9 +662,9 @@ func getMetrics(w http.ResponseWriter, r *http.Request) {
     defer mu.RUnlock()
 
     metrics := struct {
-        TotalDataSize int            `json:"total_data_size"`
-        TotalChunks   int            `json:"total_chunks"`
-        ActiveNodes   int            `json:"active_nodes"`
+        TotalDataSize int             `json:"total_data_size"`
+        TotalChunks   int             `json:"total_chunks"`
+        ActiveNodes   int             `json:"active_nodes"`
         Nodes         map[string]Node `json:"nodes"`
     }{
         TotalDataSize: int(totalFilesSize / (1024 * 1024)), // Convert bytes to MB
@@ -660,6 +682,7 @@ func getMetrics(w http.ResponseWriter, r *http.Request) {
     data, err := json.MarshalIndent(metrics, "", "  ")
     if err != nil {
         http.Error(w, "Failed to generate metrics", http.StatusInternalServerError)
+        fmt.Printf("[ERROR] Failed to generate metrics: %v\n", err)
         return
     }
 
