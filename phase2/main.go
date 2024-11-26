@@ -353,9 +353,10 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 	// if !json.Valid(data) {
 	// 	return fmt.Errorf("invalid JSON format in file %s", fileName)
 	// }
-	if err := validateJSON(data); err != nil {
-		return fmt.Errorf("JSON validation failed for %s: %w", fileName, err)
-	}
+	fmt.Printf("[DEBUG] JSON Data Content:\n%s\n", string(data))
+	// if err := validateJSON(data); err != nil {
+	// 	return fmt.Errorf("JSON validation failed for %s: %w", fileName, err)
+	// }
 
 	// Parse JSON into a generic structure
 	var rawData interface{}
