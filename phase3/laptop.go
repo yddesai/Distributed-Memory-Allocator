@@ -42,7 +42,7 @@ type ChunkInfo struct {
 
 var (
     node          Node
-    awsIP         = "18.144.165.108" // Replace with your AWS Coordinator's public IP
+    awsIP         = "<AWS_PUBLIC_IP>" // Replace with your AWS Coordinator's public IP
     awsPort       = 8080
     indexFile     = "index.json"
     dataFolder    = "data"
@@ -85,33 +85,18 @@ func initializeNode() {
     macID := getMacAddr()
     macIDClean := strings.ReplaceAll(macID, ":", "") // Remove colons
 
-    // Use Ngrok to get public URL
-    ngrokURL := getNgrokURL()
-    if ngrokURL == "" {
-        fmt.Println("[ERROR] Could not retrieve Ngrok URL. Make sure Ngrok is running.")
+    // Get public IP address
+    publicIP := getPublicIP()
+    if publicIP == "" {
+        fmt.Println("[ERROR] Could not retrieve public IP address.")
         os.Exit(1)
     }
-
-    // Extract hostname and port from Ngrok URL
-    ngrokHostPort := strings.TrimPrefix(ngrokURL, "http://")
-    ngrokHostPort = strings.TrimPrefix(ngrokHostPort, "https://")
-    host, portStr, err := net.SplitHostPort(ngrokHostPort)
-    if err != nil {
-        // If port is not specified, default to 80 for HTTP or 443 for HTTPS
-        host = ngrokHostPort
-        if strings.HasPrefix(ngrokURL, "https://") {
-            portStr = "443"
-        } else {
-            portStr = "80"
-        }
-    }
-    port, _ := strconv.Atoi(portStr)
 
     node = Node{
         ID:       "laptop-" + macIDClean[len(macIDClean)-4:], // Use the last 4 characters
         MacID:    macID,
-        IP:       host,
-        Port:     port,
+        IP:       publicIP,
+        Port:     8081,
         Capacity: 200, // 200MB capacity
     }
 
@@ -121,35 +106,19 @@ func initializeNode() {
     registerWithAWS()
 }
 
-func getNgrokURL() string {
-    resp, err := http.Get("http://localhost:4040/api/tunnels")
+func getPublicIP() string {
+    resp, err := http.Get("https://api.ipify.org?format=text")
     if err != nil {
-        fmt.Printf("[ERROR] Could not connect to Ngrok API: %v\n", err)
+        fmt.Printf("[ERROR] Failed to get public IP address: %v\n", err)
         return ""
     }
     defer resp.Body.Close()
-
-    var result map[string]interface{}
-    data, _ := ioutil.ReadAll(resp.Body)
-    err = json.Unmarshal(data, &result)
+    ip, err := ioutil.ReadAll(resp.Body)
     if err != nil {
-        fmt.Printf("[ERROR] Failed to parse Ngrok API response: %v\n", err)
+        fmt.Printf("[ERROR] Failed to read public IP response: %v\n", err)
         return ""
     }
-
-    tunnels, ok := result["tunnels"].([]interface{})
-    if !ok {
-        fmt.Println("[ERROR] No tunnels found in Ngrok API response.")
-        return ""
-    }
-
-    for _, t := range tunnels {
-        tunnel := t.(map[string]interface{})
-        if proto, ok := tunnel["proto"].(string); ok && proto == "https" {
-            return tunnel["public_url"].(string)
-        }
-    }
-    return ""
+    return strings.TrimSpace(string(ip))
 }
 
 func registerWithAWS() {
