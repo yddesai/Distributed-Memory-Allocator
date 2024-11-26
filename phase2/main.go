@@ -372,50 +372,15 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 	// Clean the JSON data by removing any trailing boundary markers
 	cleanData := cleanJSONData(data)
 
-	// Parse JSON into a generic structure
-	var rawData interface{}
-	decoder := json.NewDecoder(strings.NewReader(string(cleanData)))
-	decoder.UseNumber() // Preserve number precision and handle negative numbers
-	if err := decoder.Decode(&rawData); err != nil {
-		// Get more context around the error location
-		offset := 0
-		if jsonErr, ok := err.(*json.SyntaxError); ok {
-			offset = int(jsonErr.Offset)
-		}
-
-		// Show the problematic section
-		context := string(cleanData)
-		if offset > 0 {
-			start := offset - 20
-			if start < 0 {
-				start = 0
-			}
-			end := offset + 20
-			if end > len(context) {
-				end = len(context)
-			}
-			return fmt.Errorf("failed to decode JSON near position %d: %v\nContext: ...%s...",
-				offset, err, context[start:end])
-		}
-		return fmt.Errorf("failed to decode JSON: %w", err)
-	}
-
-	// Convert to records based on JSON structure
+	// Unmarshal directly into records slice
 	var records []map[string]interface{}
-	switch v := rawData.(type) {
-	case []interface{}: // Root is an array
-		records = make([]map[string]interface{}, 0, len(v))
-		for i, item := range v {
-			record, ok := item.(map[string]interface{})
-			if !ok {
-				return fmt.Errorf("invalid record at index %d: expected object", i)
-			}
-			records = append(records, record)
+	if err := json.Unmarshal(cleanData, &records); err != nil {
+		// Try unmarshaling as single object if array fails
+		var singleRecord map[string]interface{}
+		if err2 := json.Unmarshal(cleanData, &singleRecord); err2 != nil {
+			return fmt.Errorf("failed to parse JSON: %v", err)
 		}
-	case map[string]interface{}: // Root is an object
-		records = []map[string]interface{}{v}
-	default:
-		return fmt.Errorf("unexpected JSON format: root must be array or object")
+		records = []map[string]interface{}{singleRecord}
 	}
 
 	if len(records) == 0 {
