@@ -123,20 +123,23 @@ func getPublicIP() string {
 
 func registerWithAWS() {
     url := fmt.Sprintf("http://%s:%d/register", awsIP, awsPort)
+    fmt.Printf("[INFO] Attempting to register with AWS at %s\n", url)
+    
     data, _ := json.Marshal(node)
-    client := &http.Client{Timeout: 10 * time.Second} // Add a timeout
+    client := &http.Client{Timeout: 10 * time.Second}
     resp, err := client.Post(url, "application/json", bytes.NewBuffer(data))
     if err != nil {
         fmt.Printf("[ERROR] Failed to register with AWS Coordinator: %v\n", err)
+        fmt.Println("[INFO] Please check:")
+        fmt.Println("1. AWS IP address is correct")
+        fmt.Println("2. AWS instance security group allows inbound traffic on port 8080")
+        fmt.Println("3. Network connectivity")
         return
     }
     defer resp.Body.Close()
 
-    if resp.StatusCode == http.StatusOK {
-        fmt.Printf("[INFO] Successfully registered with AWS (Node ID: %s)\n", node.ID)
-    } else {
-        fmt.Printf("[ERROR] Failed to register with AWS Coordinator. Status code: %d\n", resp.StatusCode)
-    }
+    body, _ := ioutil.ReadAll(resp.Body)
+    fmt.Printf("[INFO] AWS Response: %s\n", string(body))
 }
 
 func sendHeartbeat() {
