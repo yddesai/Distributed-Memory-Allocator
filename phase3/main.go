@@ -84,7 +84,7 @@ func main() {
     http.HandleFunc("/metrics", getMetrics)
 
     fmt.Println("[INFO] AWS Coordinator running on port 8080...")
-    if err := http.ListenAndServe(":8080", nil); err != nil {
+    if err := http.ListenAndServe("0.0.0.0:8080", nil); err != nil {
         fmt.Printf("[ERROR] Failed to start server: %v\n", err)
     }
 }
@@ -170,19 +170,22 @@ func registerNode(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Extract the public IP from the request
+    // Remove overriding of node.IP
+    // Trust the IP provided by the node
+    /*
     ip, _, err := net.SplitHostPort(r.RemoteAddr)
     if err == nil {
         node.IP = ip
     }
+    */
 
     mu.Lock()
     defer mu.Unlock()
 
     node.Status = "active"
     node.LastSeen = time.Now()
-    nodes[node.MacID] = node
-    lastHeartbeat[node.MacID] = time.Now().Unix()
+    nodes[node.ID] = node
+    lastHeartbeat[node.ID] = time.Now().Unix()
     saveNodesToFile()
 
     fmt.Printf("[INFO] New node registered: %s (IP: %s, Port: %d, Capacity: %dMB)\n",
@@ -202,30 +205,33 @@ func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Extract the public IP from the request
+    // Remove overriding of node.IP
+    // Trust the IP provided by the node
+    /*
     ip, _, err := net.SplitHostPort(r.RemoteAddr)
     if err == nil {
         node.IP = ip
     }
+    */
 
     mu.Lock()
     defer mu.Unlock()
 
-    if existingNode, exists := nodes[node.MacID]; exists {
+    if existingNode, exists := nodes[node.ID]; exists {
         existingNode.LastSeen = time.Now()
         existingNode.Status = "active"
         existingNode.IP = node.IP
         existingNode.Port = node.Port
         existingNode.Used = node.Used
-        nodes[node.MacID] = existingNode
-        lastHeartbeat[node.MacID] = time.Now().Unix()
+        nodes[node.ID] = existingNode
+        lastHeartbeat[node.ID] = time.Now().Unix()
         saveNodesToFile()
     } else {
         // If node is not registered, register it
         node.Status = "active"
         node.LastSeen = time.Now()
-        nodes[node.MacID] = node
-        lastHeartbeat[node.MacID] = time.Now().Unix()
+        nodes[node.ID] = node
+        lastHeartbeat[node.ID] = time.Now().Unix()
         saveNodesToFile()
         fmt.Printf("[INFO] New node registered via heartbeat: %s (IP: %s, Port: %d, Capacity: %dMB)\n",
             node.ID, node.IP, node.Port, node.Capacity)
@@ -500,7 +506,7 @@ func sendChunkToNode(node Node, chunk ChunkInfo) error {
     // Update node's used space
     mu.Lock()
     node.Used += len(data) / (1024 * 1024) // Convert bytes to MB
-    nodes[node.MacID] = node
+    nodes[node.ID] = node
     mu.Unlock()
 
     return nil
@@ -513,12 +519,12 @@ func monitorNodes() {
         now := time.Now().Unix()
         statusChanged := false
 
-        for mac, last := range lastHeartbeat {
+        for id, last := range lastHeartbeat {
             if now-last > int64(heartbeatTimeout) {
-                node := nodes[mac]
+                node := nodes[id]
                 if node.Status == "active" {
                     node.Status = "inactive"
-                    nodes[mac] = node
+                    nodes[id] = node
                     statusChanged = true
                     fmt.Printf("[WARNING] Node '%s' became inactive\n", node.ID)
                 }
@@ -582,12 +588,10 @@ func removeFromSlice(slice []string, s string) []string {
 }
 
 func getNodeByID(id string) (Node, bool) {
-    for _, node := range nodes {
-        if node.ID == id {
-            return node, true
-        }
-    }
-    return Node{}, false
+    mu.RLock()
+    defer mu.RUnlock()
+    node, exists := nodes[id]
+    return node, exists
 }
 
 func handleQuery(w http.ResponseWriter, r *http.Request) {
