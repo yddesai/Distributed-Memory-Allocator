@@ -29,6 +29,26 @@ const (
 	CHUNK_SIZE = 8500 // records per chunk
 )
 
+func cleanJSONData(data []byte) []byte {
+	// Convert to string for easier manipulation
+	content := string(data)
+
+	// Remove any trailing boundary markers that might be present
+	if idx := strings.Index(content, "--"); idx != -1 {
+		content = content[:idx]
+	}
+
+	// Trim any whitespace
+	content = strings.TrimSpace(content)
+
+	// Remove any trailing commas before closing brackets/braces
+	content = strings.Replace(content, ",]", "]", -1)
+	content = strings.Replace(content, ",}", "}", -1)
+
+	// Return cleaned data as bytes
+	return []byte(content)
+}
+
 func main() {
 	// Delete old nodes.json file to start fresh
 	os.Remove("nodes.json")
@@ -349,18 +369,12 @@ func processJSONFile(fileName string, activeNodes []types.Node) error {
 		return fmt.Errorf("failed to read file %s: %w", filePath, err)
 	}
 
-	// Validate JSON format
-	// if !json.Valid(data) {
-	// 	return fmt.Errorf("invalid JSON format in file %s", fileName)
-	// }
-	fmt.Printf("[DEBUG] JSON Data Content:\n%s\n", string(data))
-	// if err := validateJSON(data); err != nil {
-	// 	return fmt.Errorf("JSON validation failed for %s: %w", fileName, err)
-	// }
+	// Clean the JSON data by removing any trailing boundary markers
+	cleanData := cleanJSONData(data)
 
 	// Parse JSON into a generic structure
 	var rawData interface{}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder := json.NewDecoder(strings.NewReader(string(cleanData)))
 	decoder.UseNumber() // Preserve number precision
 	if err := decoder.Decode(&rawData); err != nil {
 		return fmt.Errorf("failed to decode JSON: %w", err)
