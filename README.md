@@ -77,6 +77,7 @@ python client.py
 ### Commands and Usage
 - After running the client code, enter the memory capacity on the that particular client or node.
 - Enter the folder path containing the JSON file, in current project structure, the json is present in Distributed_Memory_Allocator folder
+- During Query you need to enter the id value of the record you want to fetch. (In our dataset we are having 30000 records, inside temp.json which is being redistributed into chunks.)
  
 Client Commands
 - distribute: Upload a JSON file for distribution to connected nodes.
