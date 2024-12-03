@@ -90,4 +90,4 @@ This is what the client metrics looks like as a table in command line.
 
 ![image](https://github.com/user-attachments/assets/0d0e99c9-7737-4588-8d29-279087bdb980)
 
-Project Demo Video Link : [Video Link](https://drive.google.com/file/d/1GxMpvzOdt_qHy2LP8kfetHgYhTTjJgO-/view?usp=drive_link)
+Project Demo Video Link (Needs SCU Email-ID to Access): [Video Link](https://drive.google.com/file/d/1GxMpvzOdt_qHy2LP8kfetHgYhTTjJgO-/view?usp=drive_link)
