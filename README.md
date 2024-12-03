@@ -75,8 +75,9 @@ python client.py
 ```
 
 ### Commands and Usage
-After running the client code, enter the memory capacity on the that particular client or node.
-
+- After running the client code, enter the memory capacity on the that particular client or node.
+- Enter the folder path containing the JSON file, in current project structure, the json is present in Distributed_Memory_Allocator folder
+ 
 Client Commands
 - distribute: Upload a JSON file for distribution to connected nodes.
 - metrics: Display current system metrics, including storage usage and connection status.
